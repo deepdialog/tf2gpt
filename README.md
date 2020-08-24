@@ -4,13 +4,17 @@ Structure is as same as [imcaspar/gpt2-ml](https://github.com/imcaspar/gpt2-ml),
 
 Still some difference between the three GPT code which refer, check the call function of `Transformer` class in the `model.py` for more detail.
 
+Hint, that [imcaspar/gpt2-ml](https://github.com/imcaspar/gpt2-ml) 's GPT seems not the GPT-2, but GPT-1, even they write GPT-2 in their README. GPT-2 move layer-norm to the top of transformer block, and add an additional layer-norm after the final transformer block, check [here](https://lilianweng.github.io/lil-log/2019/01/31/generalized-language-models.html#openai-gpt-2) for more detail.
+
 Paper:
 
-- [https://d4mucfpksywv.cloudfront.net/better-language-models/language-models.pdf](https://d4mucfpksywv.cloudfront.net/better-language-models/language-models.pdf)
+- GPT-2: [https://d4mucfpksywv.cloudfront.net/better-language-models/language-models.pdf](https://d4mucfpksywv.cloudfront.net/better-language-models/language-models.pdf)
+- GPT-3: [Language Models are Few-Shot Learners](https://arxiv.org/abs/2005.14165)
 
 
-Other reference repo:
+References:
 
 - Official repo (with TensorFlow 1.x) [openai/gpt-2](https://github.com/openai/gpt-2)
 - [imcaspar/gpt2-ml](https://github.com/imcaspar/gpt2-ml)
 - [karpathy/minGPT](https://github.com/karpathy/minGPT)
+- [Generalized Language Models](https://lilianweng.github.io/lil-log/2019/01/31/generalized-language-models.html#openai-gpt-2)
