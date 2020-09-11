@@ -160,18 +160,37 @@ class Transformer(tf.keras.layers.Layer):
         self.resid_drop = tf.keras.layers.Dropout(residual_dropout)
 
     def call(self, x, kv_cache=None, **kwargs):
+        # https://github.com/imcaspar/gpt2-ml/blob/6a0748b9d0279e412c40068c4c711dfc61614bbe/train/modeling.py#L225
 
-        # https://github.com/karpathy/minGPT/blob/d100e2251a258ea6c72e59eeba83539567e8fc8c/mingpt/model.py#L96
-        # https://github.com/openai/gpt-2/blob/0574c5708b094bfa0b0f6dfe3fd284d9a045acd9/src/model.py#L123
-
-        attn, cached_kv = self.attn(self.ln0(x), kv_cache=kv_cache)
-        x = x + attn
-        y = self.ln1(x)
+        a, cached_kv = self.attn(x, kv_cache=kv_cache)
+        x = x + a
+        y = self.ln0(x)
         y = self.intermediate_layer(y)
         y = gelu(y)
         y = self.output_layer(y)
         y = self.resid_drop(y)
         x = x + y
+        x = self.ln1(x)
+
+        # https://github.com/karpathy/minGPT/blob/d100e2251a258ea6c72e59eeba83539567e8fc8c/mingpt/model.py#L96
+
+        # x = x + self.attn(self.ln0(x), kv_cache=kv_cache)
+        # y = self.ln1(x)
+        # y = self.intermediate_layer(y)
+        # y = gelu(y)
+        # y = self.output_layer(y)
+        # y = self.resid_drop(y)
+        # x = x + y
+
+        # https://github.com/openai/gpt-2/blob/0574c5708b094bfa0b0f6dfe3fd284d9a045acd9/src/model.py#L123
+
+        # x = x + self.attn(self.ln0(x), kv_cache=kv_cache)
+        # y = self.ln1(x)
+        # y = self.intermediate_layer(y)
+        # y = gelu(y)
+        # y = self.output_layer(y)
+        # # No resid drop
+        # x = x + y
 
         return x, cached_kv
     
@@ -222,8 +241,6 @@ class GPT(tf.keras.Model):
                 residual_dropout=residual_dropout,
                 name=f'layer{i:02d}'
             ))
-        self.final_norm = tf.keras.layers.LayerNormalization(
-            epsilon=1e-5, name='LayerNorm_final_norm')
 
     def call(self, x, kv_cache=None, use_cache=False, **kwargs):
         shape = tf.shape(x)
@@ -246,38 +263,9 @@ class GPT(tf.keras.Model):
                 kv_cache=kv_cache[i] if kv_cache is not None else None)
             cached_kvs.append(cached_kv)
 
-        x = self.final_norm(x)
         emb_vec = tf.identity(self.token_emb.weights[0])
         x = tf.matmul(x, emb_vec,  transpose_b=True)
         x = tf.nn.log_softmax(x)
         if use_cache:
             return x, tf.stack(cached_kvs)
         return x
-
-    def train_step(self, data):
-        x, y = data
-        with tf.GradientTape() as tape:
-            logits = self.call(x)
-            loss = tf.keras.backend.sparse_categorical_crossentropy(
-                target=y, output=logits, from_logits=True
-            )
-            mask = tf.cast(x > 0, dtype=tf.float32)
-            loss *= mask
-            loss = tf.reduce_sum(loss) / tf.reduce_sum(mask)
-        gradients = tape.gradient(loss, self.trainable_variables)
-        if self.optimizer._name == 'AdamW':
-            self.optimizer.apply_gradients(
-                zip(gradients, self.trainable_variables),
-                decay_var_list=[
-                    v
-                    for v in self.trainable_variables
-                    if 'bias' not in v.name.lower() and 'norm' not in v.name.lower()
-                ]
-            )
-        else:
-            self.optimizer.apply_gradients(zip(gradients, self.trainable_variables))
-        ret = {
-            m.name: m.result() for m in self.metrics
-        }
-        ret['loss'] = loss
-        return ret
