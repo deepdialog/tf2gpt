@@ -214,9 +214,13 @@ class PositionEmbedding(tf.keras.layers.Layer):
             dtype=tf.keras.backend.floatx(),
             shape=[max_position_embeddings, embedding_size])
 
-    def call(self, x, **kwargs):
+    def call(self, x, kv_cache=None, **kwargs):
         seq_len = tf.shape(x)[1]
-        emb = tf.expand_dims(self.emb[:seq_len, :], 0)
+        if kv_cache is None:
+            emb = tf.expand_dims(self.emb[:seq_len, :], 0)
+        else:
+            before = tf.shape(kv_cache)[-2]
+            emb = tf.expand_dims(self.emb[before: before + seq_len, :], 0)
         return emb
     
     
@@ -251,7 +255,7 @@ class GPT(tf.keras.Model):
 
     def call(self, x, kv_cache=None, use_cache=False, **kwargs):
         x = self.token_emb(x)
-        x = self.emb_drop(x + self.pos_emb(x))
+        x = self.emb_drop(x + self.pos_emb(x, kv_cache=kv_cache))
 
         cached_kvs = []
         for i, layer in enumerate(self.transformers):
