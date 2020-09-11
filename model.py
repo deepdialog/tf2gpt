@@ -17,6 +17,7 @@ import numpy as np
 import tensorflow as tf
 
 
+@tf.function
 def gelu(x):
     """Gaussian Error Linear Unit.
     This is a smoother version of the RELU.
@@ -27,19 +28,41 @@ def gelu(x):
       `input_tensor` with the GELU activation applied.
 
     Way 1:
-    cdf = 0.5 * (1.0 + tf.math.erf(x / tf.sqrt(2.0)))
+    https://github.com/tensorflow/addons/blob/81529ff7dd246f7575338b8cfe65784b0cc8a502/tensorflow_addons/activations/gelu.py#L81
+
+    return 0.5 * x * (1.0 + tf.math.erf(x / tf.cast(tf.sqrt(2.0), tf.keras.backend.floatx())))
 
     Way 2:
     https://github.com/openai/gpt-2/blob/0574c5708b094bfa0b0f6dfe3fd284d9a045acd9/src/model.py#L25
-    return 0.5*x*(1+tf.tanh(np.sqrt(2/np.pi)*(x+0.044715*tf.pow(x, 3))))
+    return 0.5 * x * (1.0 + tf.tanh(tf.sqrt(2.0 / math.pi) * (x + 0.044715 * tf.pow(x, 3))))
+
+    In my test case, way 1 is faster than way 2
+
+    def gelu1(x):
+        return 0.5 * x * (1.0 + tf.math.erf(x / tf.cast(tf.sqrt(2.0), tf.keras.backend.floatx())))
+
+    def gelu2(x):
+        return 0.5 * x * (1.0 + tf.tanh(tf.sqrt(2.0 / math.pi) * (x + 0.044715 * tf.pow(x, 3))))
+
+    def test(f):
+        x = tf.random.uniform((100, 100))
+        for _ in range(1000):
+            x += f(tf.random.uniform((100, 100)))
+        return x
+
+    %timeit test(gelu1)
+    %timeit test(gelu2)
+
+    1 loop, best of 3: 262 ms per loop
+    1 loop, best of 3: 306 ms per loop
     """
-    return 0.5 * x * (1 + tf.tanh(np.sqrt(2/np.pi)*(x+0.044715*tf.pow(x, 3))))
+    return 0.5 * x * (1.0 + tf.math.erf(x / tf.cast(tf.sqrt(2.0), tf.keras.backend.floatx())))
 
 
-def get_attention_mask(nd):
+def get_attention_mask(dim):
     """
     给一个斜对角矩阵，让decoder的每个元素只能看到自己前面的，例如
-    nd = 3
+    dim = 3
     1 0 0 
     1 1 0
     1 1 1
@@ -47,14 +70,14 @@ def get_attention_mask(nd):
     Another way:
     https://github.com/openai/gpt-2/blob/0574c5708b094bfa0b0f6dfe3fd284d9a045acd9/src/model.py#L58
     
-    i = tf.range(nd)[:,None]
+    i = tf.range(dim)[:,None]
     j = tf.range(ns)
-    m = i >= j - ns + nd
+    m = i >= j - ns + dim
     return tf.cast(m, dtype)
 
     """
     return tf.cast(
-        tf.linalg.band_part(tf.ones((nd, nd)), -1, 0),
+        tf.linalg.band_part(tf.ones((dim, dim)), -1, 0),
         tf.keras.backend.floatx())
 
 
@@ -89,10 +112,7 @@ class Attention(tf.keras.layers.Layer):
         self.proj = get_dense(units=embedding_size, name='context_projection_layer')
 
     def call(self, x, kv_cache=None, **kwargs):
-        shape = tf.shape(x)
-        seq_len = shape[1]
-        attention_mask = get_attention_mask(seq_len)
-        attention_mask = tf.expand_dims(attention_mask, 0)
+        seq_len = tf.shape(x)[1]
 
         k = self.key(x)
         # [B, L, N * S] -> [B, L, N, S]
@@ -104,31 +124,35 @@ class Attention(tf.keras.layers.Layer):
         v = tf.reshape(v, [-1, seq_len, self.num_attention_heads, self.size_per_head])
         v = tf.transpose(v, perm=[0, 2, 1, 3])
 
+        q = self.query(x)
+        q = tf.reshape(q, [-1, seq_len, self.num_attention_heads, self.size_per_head])
+        q = tf.transpose(q, perm=[0, 2, 1, 3])
+
         cached_kv = tf.stack([k, v], axis=1)
         if kv_cache is not None:
             pk, pv = tf.unstack(kv_cache, axis=1)
             k = tf.concat([pk, k], axis=-2)
             v = tf.concat([pv, v], axis=-2)
-
-        q = self.query(x)
-        q = tf.reshape(q, [-1, seq_len, self.num_attention_heads, self.size_per_head])
-        q = tf.transpose(q, perm=[0, 2, 1, 3])
         
         attn = tf.matmul(q, k, transpose_b=True)  # [B, N, L, S]
         attn = tf.multiply(attn, 1.0 / math.sqrt(float(self.size_per_head)))
 
-        attention_mask = tf.expand_dims(attention_mask, axis=1)  # [B, 1, L, S]
+        # [L, S]
+        attention_mask = get_attention_mask(seq_len)
+        # [1, 1, L, S]
+        attention_mask = tf.expand_dims(tf.expand_dims(attention_mask, 0), 0)
+
         neg = float(1e10) * (1.0 - tf.cast(attention_mask, tf.keras.backend.floatx()))
         # adding to softmax -> its like removing them entirely
         attn = attn * attention_mask - neg
         attn = tf.nn.softmax(attn)  # [B, N, L, S]
         attn = self.attn_drop(attn)
-        
-        y = tf.matmul(attn, v)  # [B, N, L, S]
+
+        y = tf.matmul(attn, v)
+        # [B, N, L, S] -> [B, L, N, S]
         y = tf.transpose(y, perm=[0, 2, 1, 3])
         y = tf.reshape(y, [-1, seq_len, self.embedding_size])
-        y = self.proj(y)
-        y = self.resid_drop(y)
+        y = self.resid_drop(self.proj(y))
 
         return y, cached_kv
 
@@ -156,8 +180,15 @@ class Transformer(tf.keras.layers.Layer):
         self.ln0 = tf.keras.layers.LayerNormalization(epsilon=1e-5, name='LayerNorm_mlp_ln0')
         self.ln1 = tf.keras.layers.LayerNormalization(epsilon=1e-5, name='LayerNorm_mlp_ln1')
         self.intermediate_layer = get_dense(4 * embedding_size, name='intermediate')
+        self.activation = tf.keras.layers.Activation(gelu)
         self.output_layer = get_dense(embedding_size, name='output')
         self.resid_drop = tf.keras.layers.Dropout(residual_dropout)
+        self.ffn = tf.keras.Sequential([
+            self.intermediate_layer,
+            self.activation,
+            self.output_layer,
+            self.resid_drop
+        ])
 
     def call(self, x, kv_cache=None, **kwargs):
 
@@ -166,12 +197,7 @@ class Transformer(tf.keras.layers.Layer):
 
         attn, cached_kv = self.attn(self.ln0(x), kv_cache=kv_cache)
         x = x + attn
-        y = self.ln1(x)
-        y = self.intermediate_layer(y)
-        y = gelu(y)
-        y = self.output_layer(y)
-        y = self.resid_drop(y)
-        x = x + y
+        x = x + self.ffn(self.ln1(x))
 
         return x, cached_kv
     
@@ -190,7 +216,7 @@ class PositionEmbedding(tf.keras.layers.Layer):
 
     def call(self, x, **kwargs):
         seq_len = tf.shape(x)[1]
-        emb = self.emb
+        emb = tf.expand_dims(self.emb[:seq_len, :], 0)
         return emb
     
     
@@ -210,9 +236,7 @@ class GPT(tf.keras.Model):
 
         self.token_emb = tf.keras.layers.Embedding(vocab_size, embedding_size)
         self.pos_emb = PositionEmbedding(block_size, embedding_size)
-        self.emb_norm = tf.keras.layers.LayerNormalization(
-            epsilon=1e-5, name='LayerNorm_embed_norm')
-        self.drop = tf.keras.layers.Dropout(embedding_dropout)
+        self.emb_drop = tf.keras.layers.Dropout(embedding_dropout)
         self.transformers = []
         for i in range(layer_size):
             self.transformers.append(Transformer(
@@ -226,16 +250,10 @@ class GPT(tf.keras.Model):
             epsilon=1e-5, name='LayerNorm_final_norm')
 
     def call(self, x, kv_cache=None, use_cache=False, **kwargs):
-        shape = tf.shape(x)
-        seq_len = shape[1]
         x = self.token_emb(x)
-        pos_emb = self.pos_emb(x)
-        pos_emb = tf.expand_dims(pos_emb[:seq_len, :], 0)
-        x = tf.add(x, pos_emb)
-        x = self.emb_norm(x)
-        x = self.drop(x)
-        cached_kvs = []
+        x = self.emb_drop(x + self.pos_emb(x))
 
+        cached_kvs = []
         for i, layer in enumerate(self.transformers):
             x, cached_kv = layer(
                 x,
@@ -245,7 +263,6 @@ class GPT(tf.keras.Model):
         x = self.final_norm(x)
         emb_vec = tf.identity(self.token_emb.weights[0])
         x = tf.matmul(x, emb_vec,  transpose_b=True)
-        x = tf.nn.log_softmax(x)
         if use_cache:
             return x, tf.stack(cached_kvs)
         return x
@@ -257,9 +274,9 @@ class GPT(tf.keras.Model):
             loss = tf.keras.backend.sparse_categorical_crossentropy(
                 target=y, output=logits, from_logits=True
             )
-            mask = tf.cast(x > 0, dtype=tf.float32)
-            loss *= mask
-            loss = tf.reduce_sum(loss) / tf.reduce_sum(mask)
+            loss = tf.boolean_mask(loss, x > 0)
+            # token average
+            loss = tf.reduce_mean(loss)
         gradients = tape.gradient(loss, self.trainable_variables)
         if self.optimizer._name == 'AdamW':
             self.optimizer.apply_gradients(
