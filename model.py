@@ -230,7 +230,11 @@ class GPT(tf.keras.Model):
         seq_len = shape[1]
         x = self.token_emb(x)
         pos_emb = self.pos_emb(x)
-        pos_emb = tf.expand_dims(pos_emb[:seq_len, :], 0)
+        if kv_cache is None:
+            pos_emb = tf.expand_dims(pos_emb[:seq_len, :], 0)
+        else:
+            cache_pos = tf.shape(kv_cache)[-2]
+            pos_emb = tf.expand_dims(pos_emb[cache_pos:cache_pos + seq_len, :], 0)
         x = tf.add(x, pos_emb)
         x = self.emb_norm(x)
         x = self.drop(x)
